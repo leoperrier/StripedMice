@@ -1,0 +1,953 @@
+---
+title: "Untitled"
+author: "Léo"
+date: 'Dernière mise à jour : `r format(Sys.time(), "%d %B, %Y")`'
+fontfamily: helvetica
+fontsize: 50pt
+output:
+  html_document:
+    code_download: no
+    code_folding: hide
+    df_print: paged
+    highlight: tango
+    number_sections: yes
+    theme: yeti
+    toc: yes
+    toc_depth: 4
+    toc_float:
+      collapsed: yes
+      smooth_scroll: no
+    anchor_sections: no
+    fig_width: 7
+    fig_height: 4
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+subtitle: v1
+---
+---
+
+## Packages
+```{r message=FALSE, warning=FALSE}
+library(gridExtra)
+library(cowplot)
+library(ggplot2)
+library(ggpubr)
+library(FactoMineR)
+library(factoextra)
+library(ggsignif)
+library(corrplot)
+library(tidyr)
+library(viridis)
+library(dplyr)
+library(seewave)
+library(tuneR)
+library(soundgen)
+library(stringr)
+library(tuneR)
+library(forcats)
+library(uwot)
+library(htmlwidgets)
+library(chisq.posthoc.test)
+library(multcomp)
+library(RVAideMemoire)
+library(sjPlot)
+library(brms)
+library(rstan)
+```
+
+# Data loading
+```{r}
+encounters = read.table("D:/encounters/data_merged.csv", header = T, sep = ';', dec = ".")
+
+data = subset(encounters, End.Time..s. < 599)
+data = subset(data, Tonality > 0.25 & Score > 0.55)
+
+# On ne garde que les meetings
+data$situation = as.factor(data$situation)
+data$familiarity = as.factor(data$familiarity)
+data$same_diff_sex = as.factor(data$same_diff_sex)
+dm = subset(data, situation == "unfam-meet" | situation == "fam-meet")
+sex_fam = paste(dm$familiarity, dm$sexes, sep = "_")
+dm = cbind(dm, sex_fam)
+dm$sex_fam = as.factor(dm$sex_fam)
+
+dm = subset(dm, voc_type != 'other')
+dm = subset(dm, voc_type != 'overlaped_calls')
+dm = subset(dm, same_diff_sex == 'Diff' | (same_diff_sex == 'Same' & voc_type != 'trill'))
+dm = subset(dm, same_diff_sex == 'Diff' | (same_diff_sex == 'Same' & voc_type != 'longdown_trill'))
+timeclass = as.integer(dm$Begin.Time..s./60)
+dm = cbind(dm, timeclass)
+
+d2m = subset(dm, End.Time..s. < 180 & End.Time..s.> 0)
+d2m$timeclass = (as.integer(d2m$Begin.Time..s./20)) * 20
+
+dm$voc_type[dm$voc_type=='complex'] = 'modulated'
+dm$voc_type[dm$voc_type=='Down'] = 'down'
+```
+
+# Nombre de vocalisations 
+
+```{r}
+# on regarde pour chaque rencontre
+total_counts <- dm %>%
+  group_by(individuals, sex_fam) %>%
+  summarize(total_vocalizations = n())
+
+se <- aggregate(total_vocalizations ~ sex_fam, data = total_counts, FUN = function(x) {sqrt(var(x) / length(x))})
+mean_nvocs_encounters = aggregate(total_vocalizations ~ sex_fam, data = total_counts, FUN = mean)
+mean_nvocs_encounters$lwr = -se$total_vocalizations
+mean_nvocs_encounters$upr = se$total_vocalizations
+mean_nvocs_encounters$sex_fam = fct_relevel(mean_nvocs_encounters$sex_fam, 
+                                            "Fam_FF","Fam_MM", "Fam_MF", "Unfam_FF", "Unfam_MM", "Unfam_MF")
+mean_nvocs_encounters$confletters = c("a", "a", "a", "b", "a", "b")
+mean_nvocs_encounters$n = c("n = 6", "n = 6", "n = 6", "n = 6", "n = 15", "n = 6")
+
+nicelabs = c("Familiar\nfemales", "Familiar\nmales", "Familiar\nmales and females", "Unfamilar\nfemales", "Unfamilar\nmales", "Unfamilar\nmales and females")
+
+ggplot(mean_nvocs_encounters) +
+  geom_bar(aes(x=sex_fam, y=total_vocalizations, fill = sex_fam), stat="identity", alpha=0.7) +
+  scale_fill_manual(values = c("Fam_FF" = "#8ecae6",
+                              "Fam_MM"="#8ecae6",
+                              "Fam_MF"="#8ecae6",
+                              "Unfam_FF" = "#126782",
+                              "Unfam_MM"="#126782",
+                              "Unfam_MF"="#126782"))+
+  scale_x_discrete(labels= nicelabs) +
+  geom_errorbar(aes(x=sex_fam, ymin=total_vocalizations+lwr, ymax=total_vocalizations+upr), 
+                width=0.4, color = "#023047", alpha=0.9, size=0.5) +
+  geom_jitter(data = total_counts, aes(x = sex_fam, y = total_vocalizations), width = 0.1) +
+  geom_text(aes(label = confletters, x = sex_fam, y = 3500), vjust = -1)+
+  theme_bw()+
+  theme(panel.grid = element_blank()) +
+  labs(y = 'Mean number of vocalizations', x = 'Encounter type')+
+  ylim(0,4000)+
+  theme(legend.position = 'none')
+
+#ggsave(filename = "D:/encounters/all_plots/mean_nvocs_encounters_points.png", width = 7, height = 4)
+```
+
+
+
+```{r}
+hist(total_counts$total_vocalizations, breaks = 20)
+
+# -------------------------- MODEL BUILDING CODE --------------------------
+#
+mod_nb = brms::brm(total_vocalizations ~ sex_fam, 
+                          data = total_counts, family = "gaussian", 
+                          warmup = 1000, iter = 3000, 
+                          chains = 3, cores = 3,
+                          file = 'D:/encounters/all_models/mod_nb.rds')
+# 
+summary(mod_nb)
+# 
+plot(mod_nb, variable = c('b_Intercept', 'b_sex_famUnfam_MF'))
+# 
+pp_check(mod_nb)
+# 
+plot(conditional_effects(mod_nb), points = F)
+# 
+#
+#  ------------------------------------------------------------------------
+
+
+# fitted values 
+newdata = data.frame(sex_fam = c("Fam_FF","Fam_MM", "Fam_MF", "Unfam_FF", "Unfam_MM", "Unfam_MF"))
+fit_nb = fitted(mod_nb, newdata = newdata, summary = T, re_formula = NA)
+colnames(fit_nb) = c('fit', 'se', 'lwr', 'upr')
+pl_nb = cbind(newdata, fit_nb)
+pl_nb$lwr[pl_nb$lwr<0] = 200
+
+ggplot(data = pl_nb, aes(x = sex_fam, y = fit, color = sex_fam)) +
+  geom_pointrange(aes(ymin = lwr, ymax = upr))
+
+pl_nb$sex_fam = fct_relevel(mean_nvocs_encoutners$sex_fam, 
+                                            "Fam_FF","Fam_MM", "Fam_MF", "Unfam_FF", "Unfam_MM", "Unfam_MF")
+pl_nb$confletters = c("a", "a", "a", "b", "a", "b")
+pl_nb$n = c("n = 6", "n = 6", "n = 6", "n = 6", "n = 15", "n = 6")
+  
+ggplot(pl_nb) +
+  geom_errorbar(aes(x=sex_fam, ymin=lwr, ymax=upr), 
+                width=0.4, color = "#023047", alpha=0.9, size=1.2) +
+  geom_bar(aes(x=sex_fam, y=fit, fill = sex_fam), stat="identity", alpha=1) +
+  scale_fill_manual(values = c("Fam_FF" = "#8ecae6",
+                              "Fam_MM"="#8ecae6",
+                              "Fam_MF"="#8ecae6",
+                              "Unfam_FF" = "#126782",
+                              "Unfam_MM"="#126782",
+                              "Unfam_MF"="#126782"))+
+  geom_text(aes(label = confletters, x = sex_fam, y = upr), vjust = -1)+
+  geom_text(aes(label = n, x = sex_fam, y = 0), vjust = -1)+
+  theme_bw()+
+  theme(panel.grid = element_blank()) +
+  labs(y = 'Mean number of vocalizations', x = 'Encounter type')+
+  ylim(0,3000)+
+  theme(legend.position = 'none')
+
+
+# ggsave(filename = 'D:/encounters/all_plots/mean_vocs_bayesian.jpeg', width = 7, height = 4)
+
+# contrasts
+fit_nb= fitted(mod_nb, 
+                  newdata = newdata, 
+                  summary = F, re_formula = NA)
+
+ctr_nb = fit_nb[,c(6)]-fit_nb[,c(4)]
+mean(ctr_nb) ; quantile(ctr_nb, c(0.025,0.975))
+
+```
+
+
+# Pourcentage de vocalisations au cours de 10 minutes
+
+## Comparaison des types de rencontre
+
+### Graphique général
+
+On regarde le pourcentage d'utilisation de chaque type de call pour chaque type de rencontre, en général sur les 10 minutes.
+```{r}
+
+
+dm_per = read.table("D:/encounters/data_meetings_percentages.csv", sep = ";", dec = ",", header = T)
+
+dm_per$voc_type[dm_per$voc_type=='complex'] = 'modulated'
+dm_per$voc_type[dm_per$voc_type=='Down'] = 'down'
+
+data_new1 <- transform(dm_per, perc = ave(n, sex_fam, FUN = prop.table))
+
+data_new1$sex_fam = data_new1$sex_fam = fct_relevel(data_new1$sex_fam,"Unfam_MF","Fam_MF","Unfam_FF","Fam_FF","Unfam_MM", "Fam_MM")
+data_new1$voc_type = data_new1$voc_type = fct_relevel(data_new1$voc_type, "longdown_trill", "longdown", "trill", "down" ,"modulated", "up" , "flat")
+
+percentages = aggregate(n~sex_fam+voc_type, data_new1, FUN = sum)
+per <- transform(percentages, perc = ave(n, sex_fam, FUN = prop.table))
+
+ggplot(data = per, aes(x = perc, y = sex_fam, fill = voc_type, color = voc_type)) + 
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("flat" = "#ff595e",
+                              "up"="#ff924c",
+                              "modulated"="#FFCA3A",
+                              "down" = "#A9B858",
+                              "trill"="#52A675",
+                              "longdown"="#1982c4",
+                              "longdown_trill"="#6A4C93")) +
+  scale_color_manual(values = c("flat" = "#ff595e",
+                              "up"="#ff924c",
+                              "modulated"="#FFCA3A",
+                              "down" = "#A9B858",
+                              "trill"="#52A675",
+                              "longdown"="#1982c4",
+                              "longdown_trill"="#6A4C93")) +
+  labs(title = "Call types repartition per encounter type", y = "Encounter", x = "Percentage of calls") +
+  guides(fill=guide_legend(title="Vocalization type"))+
+  theme_classic() 
+
+
+
+ggsave(filename = "D:/encounters/all_plots/voc_type_repartition.png", width = 10, height = 7)
+```
+# UMAPS 
+
+```{r}
+files = list.files('D:/encounters/all_datasets/umaps/', full.names = T)
+i = 1 
+for (f in files) {
+  umap_df = read.table(f, sep = ',', dec = '.', header = T)
+  umap_df = umap_df[sample(1:nrow(umap_df), 2000),]
+  plot =
+  ggplot(data = umap_df, aes(x = x, y = y, color = label)) +
+    geom_point() +
+    scale_color_manual(values = c("flat" = "#ff595e",
+                            "up"="#ff924c",
+                            "complex"="#FFCA3A",
+                            "down" = "#A9B858",
+                            "trill"="#52A675",
+                            "longdown"="#1982c4",
+                            "longdown_trill"="#6A4C93")) +
+    theme_nothing()
+  print(plot)
+  # ggsave(paste0("D:/encounters/all_plots/10min_profile_", list.files('D:/encounters/all_datasets/umaps/')[i], ".jpg"),
+  #       height = 4, width = 4)
+  i = i+1
+    
+  
+}
+
+```
+
+
+# Par type de rencontre 
+
+```{r warning=FALSE}
+# creation du code couleur : 
+
+
+for (i in seq_len(length(unique(dm$sex_fam)))) {
+  
+  dsf = subset(dm, dm$sex_fam == as.character(unique(dm$sex_fam))[i])
+  dm_tc = aggregate(ID~voc_type+timeclass, data = dsf, FUN = NROW)
+  dm_tc_per = transform(dm_tc, perc = ave(ID, timeclass, FUN = prop.table))
+  names(dm_tc_per) <- c('voc_type', 'Time', 'N', 'perc')
+  dm_tc_per$voc_type = fct_relevel(dm_tc_per$voc_type, "flat", "up", "modulated", "down", "trill", "longdown", "longdown_trill")
+  
+  p_stacked_bp = ggplot(data = dm_tc_per, aes(x=Time)) +
+    geom_bar(aes(y=perc, fill = voc_type), stat="identity") +
+    scale_fill_manual(values = c("flat" = "#ff595e",
+                                "up"="#ff924c",
+                                "modulated"="#FFCA3A",
+                                "down" = "#A9B858",
+                                "trill"="#52A675",
+                                "longdown"="#1982c4",
+                                "longdown_trill"="#6A4C93")) +
+    labs(title ="", y = "Percentage of calls", x = "Time (m)") +
+    theme_classic() +
+    theme(axis.title = element_text(size = 15)) +
+    theme(axis.text = element_text(size = 15)) +
+    theme(legend.position = "none")
+
+  p_density =  ggplot(dsf, aes(x=Begin.Time..s.)) +
+      geom_density(fill="gray")+
+    labs(title= unique(dm$sex_fam)[i],x="", y = "")+
+    theme_classic() +
+    theme(axis.text.x = element_blank(), axis.text.y = element_blank())
+  
+  print(
+  ggdraw() +
+    draw_plot(p_stacked_bp, x = 0, y = 0, width = 1, height = 0.8) +
+    draw_plot(p_density, x = 0.1, y = 0.72, width = 0.89, height = 0.25)
+  )
+  
+  #ggsave(filename = paste0("D:/encounters/all_plots/10min_profile_", unique(dm$sex_fam)[i], ".jpg"), width = 5)
+}
+
+ag_timeclass = aggregate(ID ~ timeclass+sex_fam+voc_type+individuals, data= dm, FUN = length)
+
+hist(ag_timeclass$ID, breaks = 30)
+conditional_effects(brm_timeclass)
+
+ag_timeclass_general$timeclass = as.numeric(ag_timeclass_general$timeclass)
+
+
+```
+
+# stats sur la dyn teporelle
+```{r}
+
+# Dynamique sur les 10 minutes
+ag_timeclass_general = aggregate(ID ~ timeclass+sex_fam+individuals, data= dm, FUN = length)
+hist(ag_timeclass_general$ID, breaks = 30)
+
+
+ag_timeclass_general <- ag_timeclass_general %>%
+  group_by(individuals) %>%
+  mutate(perc = ID / sum(ID) * 100)
+
+ggplot(ag_timeclass_general, aes(x = as.factor(ag_timeclass_general$timeclass), y = perc)) +
+  geom_boxplot() +
+  facet_wrap(~sex_fam)
+
+
+# -------------------------- MODEL BUILDING CODE --------------------------
+#
+mod_dyn = brms::brm(perc ~ timeclass * sex_fam, 
+                          data = ag_timeclass_general, family = "zero_inflated_asym_laplace", 
+                          warmup = 1000, iter = 3000, 
+                          chains = 3, cores = 3,
+                          file = 'D:/encounters/all_models/mod_dynamique_enc_zi.rds')
+# 
+summary(mod_dyn)
+# 
+plot(mod_dyn, variable = c('b_Intercept', 'b_timeclass1'))
+# 
+pp_check(mod_dyn)
+# 
+plot(conditional_effects(mod_dyn), points = F)
+# 
+#
+#  ------------------------------------------------------------------------
+newdata = aggregate(perc~timeclass+sex_fam, data = ag_timeclass_general, FUN = length)[,c(1,2)]
+fit_dyn = fitted(mod_dyn, newdata = newdata, summary = T, re_formula = NA)
+
+ctr_dyn_uFF = as.data.frame(fit_dyn[31,4])
+fit_dyn[1]- fit_dyn[2]
+fit_dyn[11]- fit_dyn[12]
+fit_dyn[21]- fit_dyn[22]
+fit_dyn[31,4]- fit_dyn[32,4]
+fit_dyn[41,3]- fit_dyn[42,3]
+fit_dyn[51,4]- fit_dyn[52,4]
+
+ctr_dyn = rowSums(fit_dyn[,c(56:60)])- rowSums(fit_dyn[,c(51:55)])
+
+ 50 + mean(ctr_dyn) ; 50 + quantile(ctr_dyn, c(0.025,0.975))
+
+colnames(fit_dyn) = c('fit', 'se', 'lwr', 'upr')
+pl_dyn = cbind(ag_timeclass_general[,1:2], fit_dyn)
+
+ggplot()+
+  geom_point(data = pl_dyn, aes(x = timeclass, y = fit, color = sex_fam))
+
+```
+# table summary de la dynamique temporelle
+```{r}
+
+# en pourcentages
+mean_dyn = aggregate(cbind(ID, perc) ~ sex_fam + timeclass, data = ag_timeclass_general, FUN = mean)
+sd_dyn = aggregate(cbind(ID, perc) ~ sex_fam + timeclass, data = ag_timeclass_general, 
+                   FUN = function(x) {sqrt(var(x) / length(x))})
+
+
+
+```
+
+
+### Statistiques
+
+```{r}
+dt = table(dm$voc_type, dm$sex_fam)
+rownames(dt) = tolower(rownames(dt))
+chi2 = chisq.test(dt) ; chi2
+res = chi2$stdres
+
+chipv = chisq.posthoc.test::chisq.posthoc.test(dt, method = "bonferroni")
+chipv = subset(chipv, Value == "p values")
+chipv = chipv[,-2]
+colnames(chipv)[1] = "Vocalisation type"
+chipv
+x = as.vector(dt)
+
+ggplot(data = per) +
+   geom_bar( aes(x = sex_fam, y = perc, fill = voc_type), stat="identity") +
+    scale_fill_manual(values = c("flat" = "#ff595e",
+                                "up"="#ff924c",
+                                "modulated"="#FFCA3A",
+                                "down" = "#A9B858",
+                                "trill"="#52A675",
+                                "longdown"="#1982c4",
+                                "longdown_trill"="#6A4C93")) +
+    labs(title ="", y = "Percentage of calls", x = "") +
+    theme_bw()+
+   # theme(axis.title = element_text(size = 15)) +
+   #theme(axis.text = element_text(size = 15)) +
+    theme(legend.position = "none") +
+    facet_wrap(~voc_type)
+
+
+# avec un modele de vecteur
+data_new1$voc_type = as.factor(data_new1$voc_type)
+data_calls = data_new1[,c(1:3,5)]
+perc_calls <- pivot_wider(data_calls, names_from = voc_type, values_from = perc)
+perc_calls = perc_calls[,-2]
+
+
+hist(data_new1$perc)
+perc_calls = perc_calls[-32,]
+perc_calls[perc_calls==0] = 2e-16
+perc_calls[, -1] <- perc_calls[, -1] / rowSums(perc_calls[, -1])
+
+percentages = aggregate(cbind(flat, up, modulated, down, longdown, trill, longdown_trill) ~ sex_fam, data = perc_calls, FUN = mean)
+
+ggplot(data = data_new1, aes(x = sex_fam, y = perc)) +
+  geom_boxplot()+
+  facet_wrap(~voc_type)
+
+# -------------------------- MODEL BUILDING CODE --------------------------
+#
+mod_perc = brms::brm(cbind(flat, up, modulated, down, longdown, trill, longdown_trill) ~ sex_fam, 
+                          data = perc_calls, family = 'dirichlet2', 
+                          warmup = 500, iter = 4000, 
+                          chains = 4, cores = 4,
+                          file = 'D:/encounters/all_models/mod_all_perc.rds')
+# 
+summary(mod_perc)
+# 
+plot(mod_perc, variable = c('b_Intercept', 'b_sex_famUnfam_MF'))
+# 
+pp_check(mod_perc, resp = 'modulated')
+# 
+plot(conditional_effects(mod_perc), points = F)
+# 
+#
+#  ------------------------------------------------------------------------
+
+newdata = data.frame(sex_fam = levels(as.factor(perc_calls$sex_fam)))
+fit = fitted(mod_perc, newdata = newdata, robust = T, re_formula = NA, summary = F)
+
+
+
+```
+
+# contrasts
+```{r}
+fit = fitted(mod_perc, newdata = newdata, robust = F, re_formula = NA, summary = T)
+j = 1
+for (i in as.character(levels(data_new1$voc_type))) {
+  # voc = gsub("_", "", i)
+  voc = paste0('P(Y = ', i, ')')
+  pl_fit_voc = as.data.frame(fit[, , voc])
+  pl_fit_voc$voc_type = i
+  pl_fit_voc = cbind(newdata, pl_fit_voc)
+  if (j==1) {pl_fit = pl_fit_voc}
+  else {pl_fit = rbind(pl_fit, pl_fit_voc)}
+  j=j+1
+}
+
+colnames(pl_fit) = c('sex_fam', 'fit', 'se', 'lwr', 'upr', 'voc_type')
+pl_fit$sex_fam = fct_relevel(pl_fit$sex_fam, "Fam_FF","Fam_MM", "Fam_MF", "Unfam_FF", "Unfam_MM", "Unfam_MF")
+
+for (voc in unique(pl_fit$voc_type)) {
+  ggplot(data = pl_fit[pl_fit$voc_type==voc,]) +
+  geom_pointrange(aes(x = sex_fam, y = fit, ymin = lwr, ymax = upr, col = sex_fam))  +
+  scale_color_manual(values = c("Fam_FF" = "#8ecae6",
+                              "Fam_MM"="#8ecae6",
+                              "Fam_MF"="#8ecae6",
+                              "Unfam_FF" = "#126782",
+                              "Unfam_MM"="#126782",
+                              "Unfam_MF"="#126782"))+
+  theme_bw()+
+  theme(panel.grid = element_blank()) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(y = 'Mean percentage of vocalizations', x = 'Encounter type', title = voc)+
+  theme(legend.position = 'none')+
+    scale_y_log10()
+  plot(last_plot()) 
+  
+  # ggsave(paste0('D:/encounters/all_plots/voc_types/', voc, '.png'), width=3)
+}
+
+ggplot(data = pl_fit) +
+  geom_pointrange(aes(x = sex_fam, y = fit, ymin = lwr, ymax = upr, col = sex_fam))  +
+  scale_color_manual(values = c("Fam_FF" = "#8ecae6",
+                              "Fam_MM"="#8ecae6",
+                              "Fam_MF"="#8ecae6",
+                              "Unfam_FF" = "#126782",
+                              "Unfam_MM"="#126782",
+                              "Unfam_MF"="#126782"))+
+  theme_bw()+
+  theme(panel.grid = element_blank()) +
+  labs(y = 'Mean percentage of vocalizations', x = 'Encounter type')+
+  theme(legend.position = 'none') +
+  facet_wrap(~voc_type) +
+  scale_y_log10()
+  
+  
+```
+
+```{r}
+
+
+fit = fitted(mod_perc, newdata = newdata, robust = T, re_formula = NA, summary = F)
+
+d = fit[,2,"modulated"] - fit[,5,"modulated"]
+mean(d<0)
+paste0(round(quantile(d, probs = 0.5), 3), ", 95% CI [", round(quantile(d, probs = 0.025), 3), ", ", round(quantile(d, probs = 0.975), 3), "]")
+
+
+for (voc in levels(data_new1$voc_type)) {
+  
+}
+
+```
+
+# barplots
+
+```{r}
+
+new_perc <- pivot_longer(percentages, cols = -sex_fam, names_to = "voc_type", values_to = "perc")
+new_perc$voc_type = fct_relevel(new_perc$voc_type, "flat", "up", "modulated", "down", "trill", "longdown", "longdown_trill")
+
+ggplot(data = new_perc, aes(x = perc, y = sex_fam, fill = voc_type, color = voc_type)) + 
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("flat" = "#ff595e",
+                              "up"="#ff924c",
+                              "modulated"="#FFCA3A",
+                              "down" = "#A9B858",
+                              "trill"="#52A675",
+                              "longdown"="#1982c4",
+                              "longdown_trill"="#6A4C93")) +
+  scale_color_manual(values = c("flat" = "#ff595e",
+                              "up"="#ff924c",
+                              "modulated"="#FFCA3A",
+                              "down" = "#A9B858",
+                              "trill"="#52A675",
+                              "longdown"="#1982c4",
+                              "longdown_trill"="#6A4C93")) +
+  labs(title = "Call types repartition per encounter type", y = "Encounter", x = "Percentage of calls") +
+  guides(fill=guide_legend(title="Vocalisation type"))+
+  theme_classic() 
+```
+
+
+```{r}
+
+summary_acoustic = aggregate(cbind(Call.Length..s., Principal.Frequency..kHz., Low.Freq..kHz., High.Freq..kHz.,
+                                   Delta.Freq..kHz., Frequency.Standard.Deviation..kHz.)~voc_type, 
+                             data = dm, FUN = mean )
+colnames(summary_acoustic) = c("Vocalization type", "Duration (ms)", "Principal Frequency (kHz)", "Low Frequency (kHz)",
+                               "High Frequency (kHz)", "Frequency Bandwith (kHz)", "Frequency SD (kHz)")
+summary_acoustic$`Duration (ms)` = summary_acoustic$`Duration (ms)`*1000
+
+sd_acoustic = aggregate(cbind(Call.Length..s., Principal.Frequency..kHz., Low.Freq..kHz., High.Freq..kHz.,
+                                   Delta.Freq..kHz., Frequency.Standard.Deviation..kHz.)~voc_type, 
+                             data = dm, FUN = sd )
+
+  
+```
+
+# on regarde l'overlap
+```{r}
+data_overlap = subset(data, voc_type=='overlaped_calls')
+table(data_overlap$situation, data_overlap$sexes)
+
+sex_fam = paste(data_overlap$familiarity, data_overlap$sexes, sep = "_")
+data_overlap = cbind(data_overlap, sex_fam)
+
+total_counts <- dm %>%
+  group_by(sex_fam, individuals) %>%
+  summarize(total_vocalizations = n())
+
+overlap_counts <- data_overlap %>%
+  group_by(sex_fam, individuals) %>%
+  summarize(vocalizations = n())
+
+data_overlap <- total_counts %>%
+  left_join(overlap_counts, by = c("sex_fam", "individuals")) %>%
+  mutate(vocalizations = ifelse(is.na(vocalizations), 0, vocalizations)) %>%
+  mutate(percentage = vocalizations / total_vocalizations)
+
+
+#se <- aggregate(percentage ~ sex_fam, data = data_overlap, FUN = function(x) {sqrt(var(x) / length(x))})
+
+mean_nvocs_overlap = aggregate(percentage ~ sex_fam, data = data_overlap, FUN = mean)
+#mean_nvocs_overlap$se = se$percentage
+mean_nvocs_overlap$sex_fam = fct_relevel(mean_nvocs_overlap$sex_fam, 
+                                            "Fam_FF","Fam_MM", "Fam_MF", "Unfam_FF", "Unfam_MM", "Unfam_MF")
+
+# bayesian
+brm_nvocs_overlap = brm(percentage~sex_fam, 
+                        data = data_overlap[data_overlap$percentage!=0,], family = "hurdle_gamma")
+
+conditional_effects(brm_nvocs_overlap)
+pp_check(brm_nvocs_overlap)
+
+fit_nvocs_overlap = fitted(brm_nvocs_overlap, 
+                           newdata = data.frame(sex_fam = unique(mean_nvocs_overlap$sex_fam)))
+colnames(fit_nvocs_overlap) = c('fit', 'se', 'lwr', 'upr')
+fit_nvocs_overlap
+
+
+mean_nvocs_overlap$confletters = c("a", "b", "a", "a", "a", "a")
+mean_nvocs_overlap$n = c("n = 6", "n = 6", "n = 6", "n = 6", "n = 15", "n = 6")
+mean_nvocs_overlap
+
+mean_nvocs_overlap = cbind(mean_nvocs_overlap, as.data.frame(fit_nvocs_overlap))
+
+
+
+conditional_effects(brm_nvocs_overlap)
+
+ggplot(data = mean_nvocs_overlap) +
+  geom_pointrange(aes(x=sex_fam, y=fit*100, ymin=lwr*100, ymax=upr*100, color = sex_fam)) +
+  scale_color_manual(values = c("Fam_FF" = "#8ecae6",
+                              "Fam_MM"="#8ecae6",
+                              "Fam_MF"="#8ecae6",
+                              "Unfam_FF" = "#126782",
+                              "Unfam_MM"="#126782",
+                              "Unfam_MF"="#126782"))+
+  scale_x_discrete(labels= nicelabs) +
+  #geom_text(aes(label = confletters, x = sex_fam, y = percentage+upr), vjust = -1)+
+  #geom_text(aes(label = n, x = sex_fam, y = 0), vjust = -1)+
+  theme_bw()+
+  theme(panel.grid = element_blank()) +
+  labs(y = 'Mean percentage of overlap in vocalizations', x = 'Encounter type')+
+  theme(legend.position = 'none')
+
+# ggsave(filename = "D:/encounters/all_plots/perc_overlap.jpg", width = 6, height = 4)
+
+# contrasts
+
+fit = fitted(brm_nvocs_overlap, newdata = data.frame(sex_fam = unique(mean_nvocs_overlap$sex_fam)), summary = F)
+
+for (i in 1:6) {
+  for (j in 1:6) { 
+    d = fit[,i] - fit[,j]
+    mean(d<0)
+    print(i); print(j)
+    print(paste0(round(quantile(d, probs = 0.5), 3)*100, "%, [", round(quantile(d, probs = 0.025), 3)*100, "%, ", round(quantile(d, probs = 0.975), 3)*100, "%]"))
+    }
+}
+
+duration = aggregate(Call.Length..s.~sex_fam+individuals, data = dm, FUN = sum)
+
+dur_ov = merge(duration, data_overlap, by = 'individuals', all.y = T)
+
+ggplot(data = dur_ov, aes(x=percentage, y=total_vocalizations)) + 
+  geom_point()
+
+# bayesian duration
+brm_duration = brm(Call.Length..s.~sex_fam, 
+                        data = duration, family = "hurdle_gamma")
+
+conditional_effects(brm_duration, points = T)
+pp_check(brm_duration)
+
+fit_duration = fitted(brm_duration, 
+                           newdata = data.frame(sex_fam = unique(duration$sex_fam)))
+colnames(fit_duration) = c('fit', 'se', 'lwr', 'upr')
+
+pl_duration = cbind(data.frame(sex_fam = unique(duration$sex_fam)), fit_duration)
+
+ggplot(data = pl_duration) +
+  geom_pointrange(aes(x=fct_relevel(sex_fam, "Fam_FF","Fam_MM","Fam_MF","Unfam_FF","Unfam_MM","Unfam_MF"), y=fit/60, ymin=lwr/60, ymax=upr/60, color = sex_fam)) +
+  scale_color_manual(values = c("Fam_FF" = "#8ecae6",
+                              "Fam_MM"="#8ecae6",
+                              "Fam_MF"="#8ecae6",
+                              "Unfam_FF" = "#126782",
+                              "Unfam_MM"="#126782",
+                              "Unfam_MF"="#126782"))+
+  scale_x_discrete(labels= nicelabs) +
+  #geom_text(aes(label = confletters, x = sex_fam, y = percentage+upr), vjust = -1)+
+  #geom_text(aes(label = n, x = sex_fam, y = 0), vjust = -1)+
+  theme_bw()+
+  theme(panel.grid = element_blank()) +
+  labs(y = 'Total duration of vocalizations\nduring a 10-min trial (min)', x = '')+
+  theme(legend.position = 'none')
+
+ggsave(filename = "D:/encounters/all_plots/call_duration_over_trials.jpg", width = 6, height = 4)
+
+
+```
+
+
+# Dynamique des calls sur les 10 minutes rencontres / alone
+
+```{r}
+hab = readxl::read_excel('D:/separations/all_exports/12_07_23-09_31_45_merged_Stats.xlsx') 
+hab$indiv = 0
+hab$exp_type = 0
+for (i in  1:nrow(hab)) {
+  temp = strsplit(strsplit(hab$File[i], split = '\\\\')[[1]][4], split = "\\.")[[1]][1]
+  hab$indiv[i] = strsplit(temp, split = '_')[[1]][2]
+  hab$exp_type[i] = strsplit(temp, split = '_')[[1]][1]
+}
+timeclass = as.integer(hab$`Begin Time (s)`/60)
+hab$timeclass = timeclass
+table(hab$timeclass)
+
+
+alone = read.table('D:/repertoire/all_datasets/data_alone.csv', header = T, row.names = 1, sep = ';', dec = ',') 
+timeclass = as.integer(alone$Begin.Time..s./60)
+alone$timeclass = timeclass
+table(alone$timeclass)
+
+# on fait la moyenne des densités de vocs pour chaque indiv 
+total_counts <- alone %>%
+  group_by(indiv) %>%
+  summarize(total_vocalizations = n())
+
+timeclass_counts <- alone %>%
+  group_by(timeclass, indiv) %>%
+  summarize(vocalizations = n())
+
+percentage <- timeclass_counts %>%
+  left_join(total_counts, by = "indiv") %>%
+  mutate(percentage = vocalizations / total_vocalizations * 100)
+
+average_percentage <- percentage %>%
+  group_by(timeclass, indiv) %>%
+  summarize(avg_percentage = mean(percentage, na.rm = TRUE))
+
+aggregate(avg_percentage~timeclass, data = average_percentage, FUN = mean)
+
+ggplot() +
+  geom_density(data = alone, aes(x = alone$Begin.Time..s.)) +
+  geom_density(data = dm[dm$familiarity=='Fam',], aes(x = dm$Begin.Time..s.[dm$familiarity=='Fam'])) +
+  geom_density(data = dm[dm$familiarity=='Unfam',], aes(x = dm$Begin.Time..s.[dm$familiarity=='Unfam']))
+
+ggplot(data = alone, aes(x = timeclass)) +
+  geom_bar() +
+  facet_wrap(~indiv)
+```
+
+```{r}
+
+
+dyn =
+data.frame(id = c(alone$indiv, hab$indiv),
+           exp_type = c(rep('separation', nrow(alone)), rep('habituation', nrow(hab))), 
+           time = c(alone$Begin.Time..s., hab$`Begin Time (s)`))
+
+
+dyn = subset(dyn, dyn$time<600)
+dyn$timeclass = as.integer(dyn$time/60)
+ag_dyn = aggregate(time~id+exp_type+timeclass, data = dyn, FUN = length)
+colnames(ag_dyn) = c('id', 'exp_type', 'timeclass', 'n')
+
+# Create a data frame with all possible combinations of id, exp_type, and timeclass
+all_combinations <- expand.grid(
+  id = unique(ag_dyn$id),
+  timeclass = 0:9  # Assuming timeclass goes from 0 to 9
+)
+
+# Merge the original data frame with the all_combinations data frame
+# This will add missing rows with n = 0
+result <- merge(all_combinations, ag_dyn, all.x = TRUE)
+
+# Replace NA values in 'n' with 0
+result$n[is.na(result$n)] <- 0
+
+
+# Group by 'id' and 'timeclass', and calculate the sum of 'n' for each group
+ag_dyn_sum <- result %>%
+  group_by(id, timeclass, exp_type) %>%
+  summarise(total_n = sum(n))
+
+# Calculate the sum of 'n' over all time classes for each 'id'
+id_total_n <- ag_dyn_sum %>%
+  group_by(id) %>%
+  summarise(id_total_n = sum(total_n))
+
+# Join the 'id_total_n' back to 'ag_dyn_sum'
+ag_dyn_sum <- ag_dyn_sum %>%
+  left_join(id_total_n, by = "id")
+
+# Calculate the percentage ('perc') for each 'id', 'timeclass'
+ag_dyn_sum$perc <- ag_dyn_sum$total_n / ag_dyn_sum$id_total_n * 100
+
+# If you want to replace NA values in 'perc' with 0 for missing rows, you can do this:
+ag_dyn_sum$perc[is.na(ag_dyn$perc)] <- 0
+
+ag_dyn_sum$timeclass = as.numeric(ag_dyn_sum$timeclass)
+ggplot(data = ag_dyn_sum, aes(x = timeclass, y = perc, fill = exp_type))+
+  geom_boxplot()
+
+hist(ag_dyn_sum$perc, breaks = 100)
+
+ag_dyn_sum$perc=ag_dyn_sum$perc/100
+
+# construction du df avec dimininution 
+ag_dyn_sum$dim = 0
+for (i in 1:(nrow(ag_dyn_sum)-1)) { 
+  if (ag_dyn_sum$timeclass[i] != 0) {
+    if (ag_dyn_sum$perc[i] - ag_dyn_sum$perc[ag_dyn_sum$id == ag_dyn_sum$id[i] & ag_dyn_sum$timeclass == 2] < 0) {
+      ag_dyn_sum$dim[i] = ((ag_dyn_sum$perc[i] / ag_dyn_sum$perc[ag_dyn_sum$id == ag_dyn_sum$id[i] & ag_dyn_sum$timeclass == 2]) - 1) * 100 }
+    else { 
+      ag_dyn_sum$dim[i] = ((ag_dyn_sum$perc[i] / ag_dyn_sum$perc[ag_dyn_sum$id == ag_dyn_sum$id[i] & ag_dyn_sum$timeclass == 2]) - 1) * 100 }
+  }
+}
+ag_dyn_sum$dim[is.nan(ag_dyn_sum$dim)] = 0
+ag_dyn_sum$dim[ag_dyn_sum$dim == Inf] = 100
+ag_dyn_sum$dim[ag_dyn_sum$dim > 100] = 100 
+
+```
+
+# vrai data
+```{r}
+ggplot(data = ag_dyn_sum) +
+  geom_jitter(aes(x = timeclass+1, y = dim, color = exp_type))+
+  geom_smooth(aes(x = timeclass+1, y = dim, color = exp_type), method = "glm")+
+  theme_bw()+
+  theme(panel.grid = element_blank()) +
+  labs(y = 'Percentage of change in compare to\nfirst minute of experiment', x = 'Time (min)')+
+  guides(color=guide_legend(title="Experiment type")) +
+  geom_hline(yintercept = 0, linetype = 2)
+
+
+# ggsave(filename = "D:/encounters/all_plots/sepVSfam.jpg", width = 6, height = 4)
+```
+
+
+```{r}
+hist(ag_dyn_sum$total_n, breaks = 50)
+
+ag_dyn_sum$timeclass = as.factor(ag_dyn_sum$timeclass)
+ag_dyn_sum$total_n[ag_dyn_sum$exp_type=='habituation'] = ag_dyn_sum$total_n[ag_dyn_sum$exp_type=='habituation']/2
+get_prior(total_n ~ timeclass * exp_type +(1|id),
+                    data = ag_dyn_sum, family = "gamma")
+
+# -------------------------- MODEL BUILDING CODE --------------------------
+#
+mod_dyn = brms::brm(total_n ~ timeclass * exp_type +(1|id),
+                    data = ag_dyn_sum, family = "gamma",
+                    warmup = 1000, iter = 5000, 
+                    chains = 4, cores = 4,
+                    file = 'D:/separations/all_models/mod_dyn2.rds')
+# 
+summary(mod_dyn)
+# 
+plot(mod_dyn, variable = c('b_Intercept'))
+# 
+pp_check(mod_dyn)
+# 
+plot(conditional_effects(mod_dyn), points = F)
+# 
+#
+#  ------------------------------------------------------------------------
+
+
+# fitted values 
+newdata = data.frame(exp_type = c(rep("habituation",10), rep("separation",10)), timeclass = rep(seq(0,9),2))
+fit_dyn= fitted(mod_dyn, newdata = newdata, summary = T, re_formula = NA)
+colnames(fit_dyn) = c('fit', 'se', 'lwr', 'upr')
+pl_dyn = cbind(newdata, fit_dyn)
+colnames(pl_dyn)[1] = "Experiment"
+
+pl_dyn$timeclass[pl_dyn$Experiment=='separation'] = pl_dyn$timeclass[pl_dyn$Experiment=='separation']+10
+
+ggplot() +
+  geom_pointrange(data = pl_dyn, aes(x = timeclass, y = fit, ymin = lwr, ymax = upr, color = Experiment, shape = Experiment), linetype = 2) +
+  geom_smooth(data = pl_dyn, aes(x = timeclass, y = fit, group = Experiment, color = Experiment), method = "loess")+
+  geom_vline(aes(xintercept=9.5), linetype="dashed", size = 1 ) +
+  scale_colour_manual(name = "Experiment phase",
+                      labels = c("Habituation - 2 inds", "Separation - 1 ind"),
+                      values = c("#264653", "#2a9d8f")) +   
+  scale_shape_manual(name = "Experiment phase",
+                      labels = c("Habituation - 2 inds", "Separation - 1 ind"),
+                      values = c(17, 19)) +  
+  theme_bw()+
+  theme(panel.grid = element_blank()) +
+  theme(legend.position = c(.82, .85))+
+  labs(y = 'Number of vocalization emitted', x = 'Time (min)')
+ggsave(filename = 'D:/encounters/all_plots/dyn_encountersVSsep.jpeg', width = 6, height = 4)
+
+# contrasts
+fit_dyn= fitted(mod_dyn, 
+                  newdata = newdata, 
+                  summary = F, re_formula = NA)
+ctr_dyn = fit_dyn[,c(20)]-fit_dyn[,c(11)]
+mean(ctr_dyn) ; quantile(ctr_dyn, c(0.025,0.975))
+
+fit_dyn = fitted(mod_dyn, newdata = newdata, summary = F, re_formula = NA)
+ctr_dyn = rowSums(fit_dyn[,c(1:5)])- rowSums(fit_dyn[,c(6:10)])
+50 + mean(ctr_dyn)*100 ; 50 + quantile(ctr_dyn, c(0.025,0.975))*100
+
+fit_dyn = fitted(mod_dyn, newdata = newdata, summary = F, re_formula = NA)
+ctr_dyn = rowSums(fit_dyn[,c(11:15)])- rowSums(fit_dyn[,c(16:20)])
+50 - mean(ctr_dyn)*100 ; 50-quantile(ctr_dyn, c(0.025,0.975))*100
+
+# mean percentage change for fam encounters 
+
+```
+```{r}
+
+hist(dyn$time, breaks = 50)
+
+# -------------------------- MODEL BUILDING CODE --------------------------
+#
+mod_dyn_continuous = brms::brm(s(time) ~ exp_type,# + (1|id), 
+                          data = dyn, family = "student", 
+                          warmup = 500, iter = 2000, 
+                          chains = 3, cores = 3,
+                          file = 'D:/repertoire/all_models/mod_dyn_dim_continuous_s.rds')
+# 
+summary(mod_dyn_continuous)
+# 
+plot(mod_dyn, variable = c('b_Intercept', 'b_timeclass1'))
+# 
+pp_check(mod_dyn_continuous)
+# 
+plot(conditional_effects(mod_dyn_continuous), points = T)
+# 
+#
+#  ------------------------------------------------------------------------
+```
+
